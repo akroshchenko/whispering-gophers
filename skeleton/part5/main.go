@@ -35,8 +35,8 @@ import (
 )
 
 var (
-	peerAddr = flag.String("peer", "", "peer host:port")
 	self     string
+	dialAddr = flag.String("dial", "", "host:port to dial")
 )
 
 type Message struct {
@@ -47,11 +47,14 @@ type Message struct {
 func main() {
 	flag.Parse()
 
-	// TODO: Create a new listener using util.Listen and put it in a variable named l.
-	// TODO: Set the global variable self with the address of the listener.
-	// TODO: Print the address to the standard output
+	l, err := util.Listen()
+	if err != nil {
+		log.Fatal(err)
+	}
+	self = l.Addr().String()
+	log.Println("Listening on", self)
 
-	go dial(*peerAddr)
+	go dial(*dialAddr)
 
 	for {
 		c, err := l.Accept()
@@ -77,24 +80,28 @@ func serve(c net.Conn) {
 }
 
 func dial(addr string) {
+
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
-		log.Fatal(err)
+		log.Println("Failed to diad to:", addr)
+		log.Println(err)
+		return
 	}
 
 	s := bufio.NewScanner(os.Stdin)
 	e := json.NewEncoder(c)
+
 	for s.Scan() {
 		m := Message{
-			// TODO: Put the self variable in the new Addr field.
+			Addr: self,
 			Body: s.Text(),
 		}
 		err := e.Encode(m)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal("Error while encoding", err)
 		}
 	}
 	if err := s.Err(); err != nil {
-		log.Fatal(err)
+		log.Fatal("Error reading the input", err)
 	}
 }

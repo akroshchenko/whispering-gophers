@@ -23,30 +23,48 @@ import (
 	"log"
 	"net"
 	"os"
+	"time"
 )
-
-var dialAddr = flag.String("dial", "localhost:8000", "host:port to dial")
 
 type Message struct {
 	Body string
 }
 
-func main() {
-	// TODO: Parse the flags.
+var (
+	addr = flag.String("addr", "", "Address to connect to in format ip:port")
+)
 
-	// TODO: Open a new connection using the value of the "dial" flag.
-	// TODO: Don't forget to check the error.
+func main() {
+
+	flag.Parse()
+
+	c, err := net.Dial("tcp", *addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		err = tc.SetKeepAlive(true)
+		if err != nil {
+			log.Println("Error setting KeepAlive", err)
+		}
+		err = tc.SetKeepAlivePeriod(time.Second * 3)
+		if err != nil {
+			log.Println("Error setting SetKeepAlivePeriod", err)
+		}
+
+	}
+	// log.Printf("Checking UDP conn: %#v", c.(*net.UDPConn))
 
 	s := bufio.NewScanner(os.Stdin)
-	// TODO: Create a json.Encoder writing into the connection you created before.
+	e := json.NewEncoder(c)
+
 	for s.Scan() {
-		m := Message{Body: s.Text()}
-		err := e.Encode(m)
+		err := e.Encode(Message{Body: s.Text()})
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal("Error while encoding", err)
 		}
 	}
 	if err := s.Err(); err != nil {
-		log.Fatal(err)
+		log.Fatal("Error reading the input", err)
 	}
 }

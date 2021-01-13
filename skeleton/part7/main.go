@@ -13,7 +13,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -23,117 +22,132 @@ import (
 )
 
 var (
-	peerAddr = flag.String("peer", "", "peer host:port")
+	peerAddr = flag.String("peer", "", "ip:port to connect to")
 	self     string
+	messages = make(chan Message)
 )
 
 type Message struct {
-	Addr string
-	Body string
+	Addr, Body string
+}
+
+type Peers struct {
+	ch map[string]chan<- Message
+	mu sync.RWMutex
+}
+
+var peers = &Peers{
+	ch: make(map[string]chan<- Message),
+}
+
+func (p *Peers) Add(addr string) <-chan Message {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.ch[addr]; ok {
+		return nil
+	}
+	ch := make(chan Message)
+	p.ch[addr] = ch
+	return ch
+}
+
+func (p *Peers) Remove(addr string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.ch, addr)
+}
+
+func (p *Peers) List() []chan<- Message {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	l := make([]chan<- Message, 0, len(p.ch))
+	for _, ch := range p.ch {
+		l = append(l, ch)
+	}
+	return l
 }
 
 func main() {
 	flag.Parse()
+
+	go dial(*peerAddr)
+	go readInput()
 
 	l, err := util.Listen()
 	if err != nil {
 		log.Fatal(err)
 	}
 	self = l.Addr().String()
-	log.Println("Listening on", self)
-
-	go dial(*peerAddr)
-	go readInput()
-
+	log.Println("Listening on ", self)
 	for {
-		c, err := l.Accept()
+		conn, err := l.Accept()
 		if err != nil {
 			log.Fatal(err)
 		}
-		go serve(c)
+		go handleConnection(conn)
 	}
 }
-
-type Peers struct {
-	m  map[string]chan<- Message
-	mu sync.RWMutex
-}
-
-// Add creates and returns a new channel for the given peer address.
-// If an address already exists in the registry, it returns nil.
-func (p *Peers) Add(addr string) <-chan Message {
-	// TODO: Take the write lock on p.mu. Unlock it before returning (using defer).
-
-	// TODO: Check if the address is already in the peers map under the key addr.
-	// TODO: If it is, return nil.
-
-	// TODO: Make a new channel of messages
-	// TODO: Add it to the peers map
-	// TODO: Return the newly created channel.
-}
-
-// Remove deletes the specified peer from the registry.
-func (p *Peers) Remove(addr string) {
-	// TODO: Take the write lock on p.mu. Unlock it before returning (using defer).
-	// TODO: Delete the peer from the peers map.
-}
-
-// List returns a slice of all active peer channels.
-func (p *Peers) List() []chan<- Message {
-	// TODO: Take the read lock on p.mu. Unlock it before returning (using defer).
-	// TODO: Declare a slice of chan<- Message.
-
-	for /* TODO: Iterate over the map using range */ {
-		// TODO: Append each channel into the slice.
-	}
-	// TODO: Return the slice.
-}
-
-func serve(c net.Conn) {
-	defer c.Close()
-	d := json.NewDecoder(c)
-	for {
-		var m Message
-		err := d.Decode(&m)
-		if err != nil {
-			log.Println(err)
-			return
-		}
-		fmt.Printf("%#v\n", m)
-	}
-}
-
-var peer = make(chan Message)
 
 func readInput() {
 	s := bufio.NewScanner(os.Stdin)
 	for s.Scan() {
-		m := Message{
-			Addr: self,
-			Body: s.Text(),
-		}
-		peer <- m
+		broadcast(Message{self, s.Text()})
 	}
 	if err := s.Err(); err != nil {
 		log.Fatal(err)
 	}
 }
 
+func broadcast(m Message) {
+	log.Println("Sending to all message", m)
+	log.Println("Current peers %#v", peers.ch)
+	for _, ch := range peers.List() {
+		select {
+		case ch <- m:
+		default:
+		}
+	}
+}
+
+func handleConnection(c net.Conn) {
+	defer c.Close()
+	d := json.NewDecoder(c)
+	for {
+		var m Message
+		err := d.Decode(&m)
+		if err != nil {
+			log.Fatal(err)
+		}
+		go dial(m.Addr)
+		log.Printf("%#v", m)
+	}
+}
+
 func dial(addr string) {
-	c, err := net.Dial("tcp", addr)
-	if err != nil {
-		log.Println(addr, err)
+	if addr == self {
 		return
 	}
-	defer c.Close()
 
-	e := json.NewEncoder(c)
+	ch := peers.Add(addr)
+	if ch == nil {
+		return
+	}
+	defer peers.Remove(addr)
 
-	for m := range peer {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer conn.Close()
+
+	e := json.NewEncoder(conn)
+	for m := range ch {
 		err := e.Encode(m)
 		if err != nil {
-			log.Println(addr, err)
+			log.Println(err)
 			return
 		}
 	}
+
 }

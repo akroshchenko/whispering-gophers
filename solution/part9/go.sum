@@ -1,0 +1,5 @@
+github.com/Shopify/go-lua v0.0.0-20181019061002-c4c2c73f619a/go.mod h1:lvS2IGWEGk+KQkRrCXuWlcsHO5BitT0HyhnP51rh3gA=
+github.com/Shopify/go-lua v0.0.0-20201204192124-b252935ae7ee h1:a8a3qS6qPtofIk7vgf/qqMRWgHsynXBLhVCakEqIOHs=
+github.com/Shopify/go-lua v0.0.0-20201204192124-b252935ae7ee/go.mod h1:lvS2IGWEGk+KQkRrCXuWlcsHO5BitT0HyhnP51rh3gA=
+github.com/campoy/whispering-gophers v0.0.0-20201009151325-e25c2709da60 h1:w2S6sdQxiVinGnQDop/E0ZGD6eQ6h+YPEKGuf+8+eSo=
+github.com/campoy/whispering-gophers v0.0.0-20201009151325-e25c2709da60/go.mod h1:vB9iiwxgXlbPbL378xiG5vWzvDydg/fZLtqAtmaXja4=

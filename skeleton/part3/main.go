@@ -17,35 +17,47 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 )
-
-var listenAddr = flag.String("listen", "localhost:8000", "host:port to listen on")
 
 type Message struct {
 	Body string
 }
 
+var listenAddr = flag.String("listen", "", "Local address to server the connection on")
+
 func main() {
 	flag.Parse()
 
-	// TODO: Create a net.Listener listening from the address in the "listen" flag.
+	ln, err := net.Listen("tcp", *listenAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("listening on", ln.Addr())
 
 	for {
-		// TODO: Accept a new connection from the listener.
-		go serve(c)
+		c, err := ln.Accept()
+		if err != nil {
+			log.Println("Problems with serving connections from", err)
+		}
+		go handleConnection(c)
 	}
 }
 
-func serve(c net.Conn) {
-	// TODO: Use defer to Close the connection when this function returns.
+func handleConnection(c net.Conn) {
+	log.Println("serving new connection")
+	// defer c.Close()
+	d := json.NewDecoder(c)
+	var m Message
 
-	// TODO: Create a new json.Decoder reading from the connection.
 	for {
-		// TODO: Create an empty message.
-		// TODO: Decode a new message into the variable you just created.
-		// TODO: Print the message to the standard output.
+		err := d.Decode(&m)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		log.Printf("%#v\n", m)
 	}
+
 }

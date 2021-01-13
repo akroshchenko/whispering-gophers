@@ -1,18 +1,8 @@
-// Solution to part 7 of the Whispering Gophers code lab.
-//
-// This program extends part 6 by adding a Peers type.
-// The rest of the code is left as-is, so functionally there is no change.
-//
-// However we have added a peers_test.go file, so that running
-//   go test
-// from the package directory will test your implementation of the Peers type.
-//
 package main
 
 import (
 	"bufio"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -23,18 +13,16 @@ import (
 )
 
 var (
-	peerAddr = flag.String("peer", "", "peer host:port")
-	self     string
+	self string
 )
 
 type Message struct {
+	ID   string
 	Addr string
 	Body string
 }
 
 func main() {
-	flag.Parse()
-
 	l, err := util.Listen()
 	if err != nil {
 		log.Fatal(err)
@@ -42,7 +30,6 @@ func main() {
 	self = l.Addr().String()
 	log.Println("Listening on", self)
 
-	go dial(*peerAddr)
 	go readInput()
 
 	for {
@@ -53,6 +40,8 @@ func main() {
 		go serve(c)
 	}
 }
+
+var peers = &Peers{m: make(map[string]chan<- Message)}
 
 type Peers struct {
 	m  map[string]chan<- Message
@@ -90,6 +79,16 @@ func (p *Peers) List() []chan<- Message {
 	return l
 }
 
+func broadcast(m Message) {
+	for _, ch := range peers.List() {
+		select {
+		case ch <- m:
+		default:
+			// Okay to drop messages sometimes.
+		}
+	}
+}
+
 func serve(c net.Conn) {
 	defer c.Close()
 	d := json.NewDecoder(c)
@@ -100,21 +99,25 @@ func serve(c net.Conn) {
 			log.Println(err)
 			return
 		}
-		go dial(m.Addr)
+		if Seen(m.ID) {
+			continue
+		}
 		fmt.Printf("%#v\n", m)
+		broadcast(m)
+		go dial(m.Addr)
 	}
 }
-
-var peer = make(chan Message)
 
 func readInput() {
 	s := bufio.NewScanner(os.Stdin)
 	for s.Scan() {
 		m := Message{
+			ID:   util.RandomID(),
 			Addr: self,
 			Body: s.Text(),
 		}
-		peer <- m
+		Seen(m.ID)
+		broadcast(m)
 	}
 	if err := s.Err(); err != nil {
 		log.Fatal(err)
@@ -122,6 +125,15 @@ func readInput() {
 }
 
 func dial(addr string) {
+	if addr == self {
+		return // Don't try to dial self.
+	}
+
+	ch := peers.Add(addr)
+	if ch == nil {
+		return // Peer already connected.
+	}
+	defer peers.Remove(addr)
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -131,11 +143,26 @@ func dial(addr string) {
 	defer c.Close()
 
 	e := json.NewEncoder(c)
-	for m := range peer {
+	for m := range ch {
 		err := e.Encode(m)
 		if err != nil {
 			log.Println(addr, err)
 			return
 		}
 	}
+}
+
+var seenIDs = struct {
+	m map[string]bool
+	sync.Mutex
+}{m: make(map[string]bool)}
+
+// Seen returns true if the specified id has been seen before.
+// If not, it returns false and marks the given id as "seen".
+func Seen(id string) bool {
+	seenIDs.Lock()
+	ok := seenIDs.m[id]
+	seenIDs.m[id] = true
+	seenIDs.Unlock()
+	return ok
 }

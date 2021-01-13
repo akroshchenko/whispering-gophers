@@ -6,16 +6,17 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	rand2 "math/rand"
 	"net"
+	"time"
 )
 
-var seededRand *rand.Rand = rand.New(
-	rand.NewSource(time.Now().UnixNano())
-)
+var seededRand *rand2.Rand = rand2.New(rand2.NewSource(time.Now().UnixNano()))
+
 // Listen returns a Listener that listens on the first available port on the
 // first available non-loopback IPv4 network interface.
 func Listen() (net.Listener, error) {
-	ip, err := externalIP()
+	ip, err := ExternalIP()
 	if err != nil {
 		return nil, fmt.Errorf("could not find active non-loopback address: %v", err)
 	}
