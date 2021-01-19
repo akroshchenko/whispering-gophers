@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"time"
 
 	"part10-client/util"
 )
@@ -23,7 +22,7 @@ type Message struct {
 	Body string
 }
 
-func RunClient(addr string, ml int) {
+func RunClient(i int, addr string, ml int) {
 	ip, err := util.ExternalIP()
 	if err != nil {
 		log.Fatalf("could not find active non-loopback address: %v", err)
@@ -36,14 +35,13 @@ func RunClient(addr string, ml int) {
 	ip = l.Addr().String() // ip with port
 	l.Close()
 
-	log.Println("Starting new client on ", ip)
-
 	go func() {
-		// Run fake listing. This listiner will not handle somwhow any connections - just allow to connect to itself.
+		// Run fake listiner. This listiner will not handle any connections - just allow to connect to itself.
 		ls, err := net.Listen("tcp4", ip)
 		if err != nil {
 			log.Fatal(err)
 		}
+		log.Printf("Starting listiner for Client # %v on %v\n", i, ls.Addr().String())
 		defer ls.Close()
 
 		for {
@@ -60,19 +58,22 @@ func RunClient(addr string, ml int) {
 		log.Fatal(err)
 	}
 
+	log.Printf("Connecting from Client # %v (%v) to %v\n", i, c.LocalAddr().String(), addr)
+
 	e := json.NewEncoder(c)
 
 	for {
 		m := Message{
 			ID:   util.RandomID(),
 			Addr: ip,
-			Body: util.RandomString(ml, "abcdefghijklmnorstuvxyz"+"ABCDEFGHIJKLMNORSTUVXYZ"),
+			// Body: util.RandomString(ml, "abcdefghijklmnorstuvxyz"+"ABCDEFGHIJKLMNORSTUVXYZ"),
+			Body: util.RandomID(),
 		}
 		err := e.Encode(m)
 		if err != nil {
 			log.Fatal(err)
 		}
-		time.Sleep(3 * time.Second)
+		//time.Sleep(3 * time.Second)
 	}
 
 }
@@ -81,7 +82,7 @@ func main() {
 	flag.Parse()
 
 	for i := 0; i < *numOfClients; i++ {
-		go RunClient(*peerAddr, 30)
+		go RunClient(i, *peerAddr, 20)
 	}
 	fmt.Scanln()
 }

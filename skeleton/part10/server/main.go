@@ -3,10 +3,14 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"os/signal"
+	"runtime"
+	"runtime/pprof"
 	"sync"
 
 	"github.com/campoy/whispering-gophers/util"
@@ -16,6 +20,9 @@ var (
 	self string
 )
 
+var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
+var memprofile = flag.String("memprofile", "", "write memory profile to `file`")
+
 type Message struct {
 	ID   string
 	Addr string
@@ -23,12 +30,50 @@ type Message struct {
 }
 
 func main() {
+
+	flag.Parse()
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal("could not create CPU profile: ", err)
+		}
+		defer f.Close() // error handling omitted for example
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatal("could not start CPU profile: ", err)
+		}
+		// defer pprof.StopCPUProfile()
+		defer func() {
+			fmt.Println("Ending even with force quit")
+			pprof.StopCPUProfile()
+		}()
+	}
+
+	if *memprofile != "" {
+		f, err := os.Create(*memprofile)
+		if err != nil {
+			log.Fatal("could not create memory profile: ", err)
+		}
+		defer f.Close() // error handling omitted for example
+		runtime.GC()    // get up-to-date statistics
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			log.Fatal("could not write memory profile: ", err)
+		}
+	}
+
+	sigChan := make(chan os.Signal)
+	signal.Notify(sigChan, os.Interrupt)
+
 	l, err := util.Listen()
 	if err != nil {
 		log.Fatal(err)
 	}
 	self = l.Addr().String()
 	log.Println("Listening on", self)
+
+	go func() {
+		<-sigChan
+		l.Close()
+	}()
 
 	go readInput()
 
