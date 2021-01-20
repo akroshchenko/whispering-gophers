@@ -72,6 +72,7 @@ func main() {
 
 	go func() {
 		<-sigChan
+		log.Println("Receiving signal")
 		l.Close()
 	}()
 
