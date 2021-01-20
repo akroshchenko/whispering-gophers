@@ -76,6 +76,10 @@ func main() {
 		l.Close()
 	}()
 
+	defer func() {
+		err := recover()
+		log.Printf("Recoverd from error: %v of type %T\n", err, err)
+	}()
 	go readInput()
 
 	for {
