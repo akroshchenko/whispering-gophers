@@ -3,9 +3,13 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net"
+	"os"
+	"os/signal"
+	"sync"
 
 	"part10-client/util"
 )
@@ -16,13 +20,19 @@ var (
 	self         string
 )
 
+// Q: Does it make sence to put the common code for client and server to a different package.
+// Q: What are the principles of package/dir structure
 type Message struct {
 	ID   string
 	Addr string
 	Body string
 }
 
-func RunClient(i int, addr string, ml int) {
+func RunClient(sigChan <-chan os.Signal, wg *sync.WaitGroup, i int, addr string, ml int) {
+
+	defer wg.Done()
+
+	// Cannot make ip var global as ExternalIP returns 2 parameters
 	ip, err := util.ExternalIP()
 	if err != nil {
 		log.Fatalf("could not find active non-loopback address: %v", err)
@@ -32,24 +42,28 @@ func RunClient(i int, addr string, ml int) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ip = l.Addr().String() // ip with port
-	l.Close()
+
+	// Q: is it the right place to handle the closign?
+	// TODO: think about handling error from Close()
+	defer l.Close()
+
+	ip = l.Addr().String()
+
+	log.Printf("Starting listiner for Client # %v on %v\n", i, ip)
 
 	go func() {
-		// Run fake listiner. This listiner will not handle any connections - just allow to connect to itself.
-		ls, err := net.Listen("tcp4", ip)
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Printf("Starting listiner for Client # %v on %v\n", i, ls.Addr().String())
-		defer ls.Close()
-
 		for {
-			c, err := ls.Accept()
+			select {
+			case <-sigChan:
+				break
+			default:
+			}
+
+			c, err := l.Accept()
 			if err != nil {
 				log.Fatal(err)
 			}
-			defer c.Close()
+			io.Copy(ioutil.Discard, c)
 		}
 	}()
 
@@ -63,26 +77,41 @@ func RunClient(i int, addr string, ml int) {
 	e := json.NewEncoder(c)
 
 	for {
+		select {
+		case <-sigChan:
+			break
+		default:
+		}
+
 		m := Message{
 			ID:   util.RandomID(),
 			Addr: ip,
+			// TOOD: fix it. It will be needed for memory profiling (maybe)
 			// Body: util.RandomString(ml, "abcdefghijklmnorstuvxyz"+"ABCDEFGHIJKLMNORSTUVXYZ"),
 			Body: util.RandomID(),
 		}
 		err := e.Encode(m)
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
+			return
 		}
 		//time.Sleep(3 * time.Second)
 	}
 
+	// wg.Done()
 }
 
 func main() {
 	flag.Parse()
 
+	sigChan := make(chan os.Signal)
+	signal.Notify(sigChan)
+
+	var wg sync.WaitGroup
+
+	wg.Add(*numOfClients)
 	for i := 0; i < *numOfClients; i++ {
-		go RunClient(i, *peerAddr, 20)
+		go RunClient(sigChan, &wg, i, *peerAddr, 20)
 	}
-	fmt.Scanln()
+	wg.Wait()
 }
