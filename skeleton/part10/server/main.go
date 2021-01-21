@@ -43,7 +43,7 @@ func main() {
 		}
 		// defer pprof.StopCPUProfile()
 		defer func() {
-			fmt.Println("Ending even with force quit")
+			// fmt.Println("Ending even with force quit")
 			pprof.StopCPUProfile()
 		}()
 	}
@@ -85,7 +85,8 @@ func main() {
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			log.Fatal(err)
+			log.Println(err)
+			return
 		}
 		go serve(c)
 	}
