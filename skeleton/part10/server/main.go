@@ -12,12 +12,14 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sync"
+	"syscall"
 
 	"github.com/campoy/whispering-gophers/util"
 )
 
 var (
-	self string
+	self             string
+	interceptSignals = []os.Signal{syscall.SIGINT}
 )
 
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
@@ -32,6 +34,7 @@ type Message struct {
 func main() {
 
 	flag.Parse()
+
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
 		if err != nil {
@@ -43,7 +46,7 @@ func main() {
 		}
 		// defer pprof.StopCPUProfile()
 		defer func() {
-			fmt.Println("Ending even with force quit")
+			// fmt.Println("Ending even with force quit")
 			pprof.StopCPUProfile()
 		}()
 	}
@@ -60,34 +63,64 @@ func main() {
 		}
 	}
 
-	sigChan := make(chan os.Signal)
-	signal.Notify(sigChan, os.Interrupt)
+	// Q: does it make sence to use buffered channel or not? (tried with buffered channel - does not work)
+	// There was interesting problem https://github.com/golang/go/issues/38290
+	// https://go.googlesource.com/proposal/+/master/design/24543-non-cooperative-preemption.md
+	sigChan := make(chan os.Signal, len(interceptSignals))
+	signal.Notify(sigChan, interceptSignals...)
+	log.Println("The next OS signal will be intercepted by this program: ", interceptSignals)
 
 	l, err := util.Listen()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Q: is it ok to handle the return err from close like this?
+	defer func() {
+		log.Println("Closing listener")
+		if err := l.Close(); err != nil {
+			log.Printf("Error while closing listener: %w\n", err)
+		}
+	}()
+
 	self = l.Addr().String()
+
 	log.Println("Listening on", self)
 
-	go func() {
-		<-sigChan
-		log.Println("Receiving signal")
-		l.Close()
-	}()
-
-	defer func() {
-		err := recover()
-		log.Printf("Recoverd from error: %v of type %T\n", err, err)
-	}()
-	go readInput()
+	var connCount int64
+	quit := make(chan struct{})
 
 	for {
-		c, err := l.Accept()
-		if err != nil {
-			log.Fatal(err)
+		select {
+		case s := <-sigChan:
+			log.Printf("Recieved interaption signal: %v\n", s)
+
+			// Close serving
+			log.Println("Sending a quit signal to outgoing connections")
+			for i := 0; int64(i) < connCount; i++ {
+				quit <- struct{}{}
+			}
+			// Close outgoing connections
+			log.Println("Closing channels for outgoing connections")
+			for _, c := range peers.List() {
+				close(c)
+			}
+
+			// Q: is it ok to close a listiner as soon as posible? (as a result we will call close several times)
+			log.Println("Closing listener")
+			if err := l.Close(); err != nil {
+				log.Printf("Error while closing listener: %w\n", err)
+			}
+			break
+		default:
+			c, err := l.Accept()
+			if err != nil {
+				log.Printf("Error with accepting connection: %w", err)
+				return
+			}
+			connCount++
+			go serve(quit, c)
 		}
-		go serve(c)
 	}
 }
 
@@ -139,14 +172,21 @@ func broadcast(m Message) {
 	}
 }
 
-func serve(c net.Conn) {
+func serve(quit <-chan struct{}, c net.Conn) {
 	defer c.Close()
 	d := json.NewDecoder(c)
 	for {
+		select {
+		case <-quit:
+			log.Println("Serving connection: Recieved the signal to end serving connection\n")
+			break
+		default:
+		}
+
 		var m Message
 		err := d.Decode(&m)
 		if err != nil {
-			log.Println(err)
+			log.Printf("Serving connection: error with decoding message from %v: %w\n", c.RemoteAddr(), err)
 			return
 		}
 		if Seen(m.ID) {
@@ -159,6 +199,7 @@ func serve(c net.Conn) {
 }
 
 func readInput() {
+	log.Println("Attaching Stdin to the server input...")
 	s := bufio.NewScanner(os.Stdin)
 	for s.Scan() {
 		m := Message{
@@ -184,6 +225,8 @@ func dial(addr string) {
 		return // Peer already connected.
 	}
 	defer peers.Remove(addr)
+
+	log.Println("Dealing to ", addr)
 
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
