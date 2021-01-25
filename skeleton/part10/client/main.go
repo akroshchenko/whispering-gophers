@@ -10,14 +10,18 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"syscall"
+	"time"
 
 	"part10-client/util"
 )
 
 var (
-	peerAddr     = flag.String("peer", "", "peer host:port")
-	numOfClients = flag.Int("num", 3, "number of parallel clients to spawn")
-	self         string
+	peerAddr         = flag.String("peer", "", "peer host:port")
+	numOfClients     = flag.Int("num", 3, "number of parallel clients to spawn")
+	self             string
+	interceptSignals = []os.Signal{syscall.SIGINT}
+	GlobalTimeout    = 10 * time.Minute
 )
 
 // Q: Does it make sence to put the common code for client and server to a different package.
@@ -28,7 +32,7 @@ type Message struct {
 	Body string
 }
 
-func RunClient(sigChan <-chan os.Signal, wg *sync.WaitGroup, i int, addr string, ml int) {
+func RunClient(quit <-chan struct{}, wg *sync.WaitGroup, i int, addr string, ml int) {
 
 	defer wg.Done()
 
@@ -44,8 +48,13 @@ func RunClient(sigChan <-chan os.Signal, wg *sync.WaitGroup, i int, addr string,
 	}
 
 	// Q: is it the right place to handle the closign?
-	// TODO: think about handling error from Close()
-	defer l.Close()
+	// Q: is it ok to handle the return err from close like this?
+	defer func() {
+		log.Println("Closing listener")
+		if err := l.Close(); err != nil {
+			log.Printf("Error while closing listener: %w\n", err)
+		}
+	}()
 
 	ip = l.Addr().String()
 
@@ -54,7 +63,7 @@ func RunClient(sigChan <-chan os.Signal, wg *sync.WaitGroup, i int, addr string,
 	go func() {
 		for {
 			select {
-			case <-sigChan:
+			case <-quit:
 				break
 			default:
 			}
@@ -78,7 +87,7 @@ func RunClient(sigChan <-chan os.Signal, wg *sync.WaitGroup, i int, addr string,
 
 	for {
 		select {
-		case <-sigChan:
+		case <-quit:
 			break
 		default:
 		}
@@ -92,26 +101,40 @@ func RunClient(sigChan <-chan os.Signal, wg *sync.WaitGroup, i int, addr string,
 		}
 		err := e.Encode(m)
 		if err != nil {
-			log.Print(err)
-			return
+			log.Fatal(err)
 		}
-		//time.Sleep(3 * time.Second)
+		time.Sleep(3 * time.Second)
 	}
-
-	// wg.Done()
 }
 
 func main() {
 	flag.Parse()
 
-	sigChan := make(chan os.Signal)
-	signal.Notify(sigChan)
+	sigChan := make(chan os.Signal, len(interceptSignals))
+	signal.Notify(sigChan, interceptSignals...)
+	log.Println("The next OS signal will be intercepted by this program: ", interceptSignals)
+
+	// Q: what is better: buffered or not? I am for buffered but needs to be checked.
+	quit := make(chan struct{}, *numOfClients)
+
+	go func() {
+		select {
+		case <-sigChan:
+			for i := 0; i < *numOfClients; i++ {
+				quit <- struct{}{}
+			}
+		case <-time.NewTimer(GlobalTimeout).C:
+			log.Println("Exit by timeout: ", GlobalTimeout)
+			os.Exit(0)
+		}
+	}()
 
 	var wg sync.WaitGroup
 
 	wg.Add(*numOfClients)
 	for i := 0; i < *numOfClients; i++ {
-		go RunClient(sigChan, &wg, i, *peerAddr, 20)
+		go RunClient(quit, &wg, i, *peerAddr, 20)
 	}
+
 	wg.Wait()
 }
