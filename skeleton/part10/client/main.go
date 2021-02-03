@@ -1,3 +1,4 @@
+// TODO: fix gracefull shutdow when several client have been connected to remote server
 package main
 
 import (
@@ -33,7 +34,6 @@ type Message struct {
 }
 
 func RunClient(quit <-chan struct{}, wg *sync.WaitGroup, i int, addr string, ml int) {
-
 	defer wg.Done()
 
 	// Cannot make ip var global as ExternalIP returns 2 parameters
@@ -47,12 +47,10 @@ func RunClient(quit <-chan struct{}, wg *sync.WaitGroup, i int, addr string, ml 
 		log.Fatal(err)
 	}
 
-	// Q: is it the right place to handle the closign?
-	// Q: is it ok to handle the return err from close like this?
 	defer func() {
-		log.Println("Closing listener")
+		// log.Println("Closing listener")
 		if err := l.Close(); err != nil {
-			log.Printf("Error while closing listener: %w\n", err)
+			log.Printf("Error while closing listener: %v\n", err)
 		}
 	}()
 
@@ -60,19 +58,32 @@ func RunClient(quit <-chan struct{}, wg *sync.WaitGroup, i int, addr string, ml 
 
 	log.Printf("Starting listiner for Client # %v on %v\n", i, ip)
 
+	newConns := make(chan net.Conn)
+
+	go func() {
+		for {
+			con, err := l.Accept()
+			if err != nil {
+				log.Printf("Error with accepting connection: %v", err)
+				newConns <- nil
+				return
+			}
+			newConns <- con
+		}
+	}()
+
 	go func() {
 		for {
 			select {
 			case <-quit:
-				break
-			default:
+				return
+			case con := <-newConns:
+				if con == nil {
+					return
+				}
+				// Allow connections to dummy client listiner but do nothing
+				io.Copy(ioutil.Discard, con)
 			}
-
-			c, err := l.Accept()
-			if err != nil {
-				log.Fatal(err)
-			}
-			io.Copy(ioutil.Discard, c)
 		}
 	}()
 
@@ -90,20 +101,20 @@ func RunClient(quit <-chan struct{}, wg *sync.WaitGroup, i int, addr string, ml 
 		case <-quit:
 			break
 		default:
+			m := Message{
+				ID:   util.RandomID(),
+				Addr: ip,
+				// TOOD: fix it. It will be needed for memory profiling (maybe)
+				// Body: util.RandomString(ml, "abcdefghijklmnorstuvxyz"+"ABCDEFGHIJKLMNORSTUVXYZ"),
+				Body: util.RandomID(),
+			}
+			err := e.Encode(m)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			// time.Sleep(3 * time.Second)
 		}
-
-		m := Message{
-			ID:   util.RandomID(),
-			Addr: ip,
-			// TOOD: fix it. It will be needed for memory profiling (maybe)
-			// Body: util.RandomString(ml, "abcdefghijklmnorstuvxyz"+"ABCDEFGHIJKLMNORSTUVXYZ"),
-			Body: util.RandomID(),
-		}
-		err := e.Encode(m)
-		if err != nil {
-			log.Fatal(err)
-		}
-		time.Sleep(3 * time.Second)
 	}
 }
 
@@ -115,26 +126,25 @@ func main() {
 	log.Println("The next OS signal will be intercepted by this program: ", interceptSignals)
 
 	// Q: what is better: buffered or not? I am for buffered but needs to be checked.
-	quit := make(chan struct{}, *numOfClients)
-
-	go func() {
-		select {
-		case <-sigChan:
-			for i := 0; i < *numOfClients; i++ {
-				quit <- struct{}{}
-			}
-		case <-time.NewTimer(GlobalTimeout).C:
-			log.Println("Exit by timeout: ", GlobalTimeout)
-			os.Exit(0)
-		}
-	}()
+	quit := make(chan struct{})
 
 	var wg sync.WaitGroup
 
 	wg.Add(*numOfClients)
+
 	for i := 0; i < *numOfClients; i++ {
 		go RunClient(quit, &wg, i, *peerAddr, 20)
 	}
+
+	select {
+	case s := <-sigChan:
+		log.Printf("Received inraption signal: %v\n", s)
+	case <-time.After(time.Minute * 2):
+		log.Println("Time out")
+	}
+
+	log.Println("Sending a quit signal to all running clients")
+	close(quit)
 
 	wg.Wait()
 }

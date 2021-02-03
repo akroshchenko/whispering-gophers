@@ -1,7 +1,8 @@
+// TODO: fix gracefull shutdow when several client have been connected
+
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,7 +20,7 @@ import (
 
 var (
 	self             string
-	interceptSignals = []os.Signal{syscall.SIGINT}
+	interceptSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM}
 )
 
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
@@ -63,7 +64,7 @@ func main() {
 		}
 	}
 
-	// Q: does it make sence to use buffered channel or not? (tried with buffered channel - does not work)
+	// Q: does it make sence to use buffered channel or not?
 	// There was interesting problem https://github.com/golang/go/issues/38290
 	// https://go.googlesource.com/proposal/+/master/design/24543-non-cooperative-preemption.md
 	sigChan := make(chan os.Signal, len(interceptSignals))
@@ -77,9 +78,11 @@ func main() {
 
 	// Q: is it ok to handle the return err from close like this?
 	defer func() {
-		log.Println("Closing listener")
+		log.Println("Defer: Closing listener")
 		if err := l.Close(); err != nil {
-			log.Printf("Error while closing listener: %w\n", err)
+			// TODO fix the error:
+			// Error while closing listener: close tcp4 192.168.1.186:52508: use of closed network connection
+			log.Printf("Defer: Error while closing listener: %v\n", err)
 		}
 	}()
 
@@ -87,40 +90,58 @@ func main() {
 
 	log.Println("Listening on", self)
 
-	var connCount int64
-	quit := make(chan struct{})
-
-	for {
-		select {
-		case s := <-sigChan:
-			log.Printf("Recieved interaption signal: %v\n", s)
-
-			// Close serving
-			log.Println("Sending a quit signal to outgoing connections")
-			for i := 0; int64(i) < connCount; i++ {
-				quit <- struct{}{}
-			}
-			// Close outgoing connections
-			log.Println("Closing channels for outgoing connections")
-			for _, c := range peers.List() {
-				close(c)
-			}
-
-			// Q: is it ok to close a listiner as soon as posible? (as a result we will call close several times)
-			log.Println("Closing listener")
-			if err := l.Close(); err != nil {
-				log.Printf("Error while closing listener: %w\n", err)
-			}
-			break
-		default:
+	newConns := make(chan net.Conn)
+	go func() {
+		for {
 			c, err := l.Accept()
 			if err != nil {
-				log.Printf("Error with accepting connection: %w", err)
+				log.Printf("Error with accepting connection: %v", err)
+				newConns <- nil
 				return
 			}
-			connCount++
-			go serve(quit, c)
+			newConns <- c
 		}
+	}()
+
+	quit := make(chan struct{})
+
+	var wg sync.WaitGroup
+
+	go func() {
+		for {
+			select {
+			case <-quit:
+				log.Printf("Receiving connections: Recieved quit signal")
+				// l.Close()
+				if err := l.Close(); err != nil {
+					log.Printf("Receiving connections: Error while closing listener: %v\n", err)
+				}
+				return
+			case con := <-newConns:
+				if con == nil {
+					return
+				}
+				wg.Add(1)
+				go serve(quit, &wg, con)
+			}
+		}
+	}()
+
+	s := <-sigChan
+	log.Printf("Recieved interaption signal: %v\n", s)
+
+	// Close serving
+	log.Println("Sending a quit signal to outgoing connections")
+	close(quit)
+
+	wg.Wait()
+
+	// make sure no one writes to the closed channel
+
+	// Close outgoing connections
+	log.Println("Closing channels for outgoing connections")
+	for _, c := range peers.List() {
+		close(c)
 	}
 }
 
@@ -162,60 +183,71 @@ func (p *Peers) List() []chan<- Message {
 	return l
 }
 
-func broadcast(m Message) {
+func broadcast(quit <-chan struct{}, m Message) {
 	for _, ch := range peers.List() {
+		// Q: is it ok to do so? (how to add quit channel a higher priority?)
 		select {
+		case <-quit:
+			log.Println("Brodcas: Received the quit signal")
+			return
+		default:
+		}
+		select {
+		case <-quit:
+			log.Println("Brodcas: Received the quit signal")
+			return
 		case ch <- m:
 		default:
+			log.Println("Broadcast: dropping the messages")
 			// Okay to drop messages sometimes.
 		}
 	}
 }
 
-func serve(quit <-chan struct{}, c net.Conn) {
+func serve(quit <-chan struct{}, wg *sync.WaitGroup, c net.Conn) {
+	defer wg.Done()
 	defer c.Close()
 	d := json.NewDecoder(c)
 	for {
 		select {
 		case <-quit:
-			log.Println("Serving connection: Recieved the signal to end serving connection\n")
-			break
-		default:
-		}
-
-		var m Message
-		err := d.Decode(&m)
-		if err != nil {
-			log.Printf("Serving connection: error with decoding message from %v: %w\n", c.RemoteAddr(), err)
+			log.Println("Serving connection: Received the signal to end serving connection\n")
 			return
+		default:
+			var m Message
+			err := d.Decode(&m)
+			if err != nil {
+				log.Printf("Serving connection: error with decoding message from %v: %w\n", c.RemoteAddr(), err)
+				return
+			}
+			if Seen(m.ID) {
+				continue
+			}
+			fmt.Printf("%#v\n", m)
+			broadcast(quit, m)
+			go dial(quit, m.Addr)
 		}
-		if Seen(m.ID) {
-			continue
-		}
-		fmt.Printf("%#v\n", m)
-		broadcast(m)
-		go dial(m.Addr)
 	}
 }
 
-func readInput() {
-	log.Println("Attaching Stdin to the server input...")
-	s := bufio.NewScanner(os.Stdin)
-	for s.Scan() {
-		m := Message{
-			ID:   util.RandomID(),
-			Addr: self,
-			Body: s.Text(),
-		}
-		Seen(m.ID)
-		broadcast(m)
-	}
-	if err := s.Err(); err != nil {
-		log.Fatal(err)
-	}
-}
+// func readInput() {
+// 	log.Println("Attaching Stdin to the server input...")
+// 	s := bufio.NewScanner(os.Stdin)
+// 	for s.Scan() {
+// 		m := Message{
+// 			ID:   util.RandomID(),
+// 			Addr: self,
+// 			Body: s.Text(),
+// 		}
+// 		Seen(m.ID)
+// 		broadcast(m)
+// 	}
+// 	if err := s.Err(); err != nil {
+// 		log.Fatal(err)
+// 	}
+// }
 
-func dial(addr string) {
+func dial(quit <-chan struct{}, addr string) {
 	if addr == self {
 		return // Don't try to dial self.
 	}
@@ -228,18 +260,32 @@ func dial(addr string) {
 
 	log.Println("Dealing to ", addr)
 
-	c, err := net.Dial("tcp", addr)
+	con, err := net.Dial("tcp", addr)
 	if err != nil {
 		log.Println(addr, err)
 		return
 	}
-	defer c.Close()
+	defer con.Close()
 
-	e := json.NewEncoder(c)
-	for m := range ch {
+	e := json.NewEncoder(con)
+	// for m := range ch {
+	// 	err := e.Encode(m)
+	// 	if err != nil {
+	// 		log.Println(addr, err)
+	// 		return
+	// 	}
+	// }
+	select {
+	case <-quit:
+		log.Println("Dialing: Received quit signal")
+		return
+	case m, ok := <-ch:
+		if !ok {
+			return
+		}
 		err := e.Encode(m)
 		if err != nil {
-			log.Println(addr, err)
+			log.Printf("Dialing: Error to encode message from %v: %v\n", addr, err)
 			return
 		}
 	}
