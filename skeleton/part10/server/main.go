@@ -10,12 +10,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"runtime"
-	"runtime/pprof"
 	"sync"
 	"syscall"
 
 	"github.com/campoy/whispering-gophers/util"
+	"github.com/pkg/profile"
 )
 
 var (
@@ -37,31 +36,11 @@ func main() {
 	flag.Parse()
 
 	if *cpuprofile != "" {
-		f, err := os.Create(*cpuprofile)
-		if err != nil {
-			log.Fatal("could not create CPU profile: ", err)
-		}
-		defer f.Close() // error handling omitted for example
-		if err := pprof.StartCPUProfile(f); err != nil {
-			log.Fatal("could not start CPU profile: ", err)
-		}
-		// defer pprof.StopCPUProfile()
-		defer func() {
-			// fmt.Println("Ending even with force quit")
-			pprof.StopCPUProfile()
-		}()
+		defer profile.Start(profile.CPUProfile, profile.ProfilePath(*cpuprofile), profile.NoShutdownHook).Stop()
 	}
 
 	if *memprofile != "" {
-		f, err := os.Create(*memprofile)
-		if err != nil {
-			log.Fatal("could not create memory profile: ", err)
-		}
-		defer f.Close() // error handling omitted for example
-		runtime.GC()    // get up-to-date statistics
-		if err := pprof.WriteHeapProfile(f); err != nil {
-			log.Fatal("could not write memory profile: ", err)
-		}
+		defer profile.Start(profile.MemProfile, profile.ProfilePath(*memprofile), profile.NoShutdownHook).Stop()
 	}
 
 	// Q: does it make sence to use buffered channel or not?
@@ -73,7 +52,8 @@ func main() {
 
 	l, err := util.Listen()
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 
 	// Q: is it ok to handle the return err from close like this?
@@ -193,9 +173,6 @@ func broadcast(quit <-chan struct{}, m Message) {
 		default:
 		}
 		select {
-		case <-quit:
-			log.Println("Brodcas: Received the quit signal")
-			return
 		case ch <- m:
 		default:
 			log.Println("Broadcast: dropping the messages")
@@ -214,19 +191,20 @@ func serve(quit <-chan struct{}, wg *sync.WaitGroup, c net.Conn) {
 			log.Println("Serving connection: Received the signal to end serving connection\n")
 			return
 		default:
-			var m Message
-			err := d.Decode(&m)
-			if err != nil {
-				log.Printf("Serving connection: error with decoding message from %v: %w\n", c.RemoteAddr(), err)
-				return
-			}
-			if Seen(m.ID) {
-				continue
-			}
-			fmt.Printf("%#v\n", m)
-			broadcast(quit, m)
-			go dial(quit, m.Addr)
 		}
+
+		var m Message
+		err := d.Decode(&m)
+		if err != nil {
+			log.Printf("Serving connection: error with decoding message from %v: %w\n", c.RemoteAddr(), err)
+			return
+		}
+		if Seen(m.ID) {
+			continue
+		}
+		fmt.Printf("%#v\n", m)
+		broadcast(quit, m)
+		go dial(quit, m.Addr)
 	}
 }
 
@@ -268,21 +246,13 @@ func dial(quit <-chan struct{}, addr string) {
 	defer con.Close()
 
 	e := json.NewEncoder(con)
-	// for m := range ch {
-	// 	err := e.Encode(m)
-	// 	if err != nil {
-	// 		log.Println(addr, err)
-	// 		return
-	// 	}
-	// }
-	select {
-	case <-quit:
-		log.Println("Dialing: Received quit signal")
-		return
-	case m, ok := <-ch:
-		if !ok {
+	for m := range ch {
+		select {
+		case <-quit:
 			return
+		default:
 		}
+
 		err := e.Encode(m)
 		if err != nil {
 			log.Printf("Dialing: Error to encode message from %v: %v\n", addr, err)
